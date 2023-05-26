@@ -11,6 +11,7 @@ from lib.utils.learning import *
 from lib.utils.utils_data import flip_data
 from lib.data.dataset_wild import WildDetDataset
 from lib.utils.vismo import render_and_save
+from multiprocessing import freeze_support
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -28,70 +29,118 @@ def parse_args():
 opts = parse_args()
 args = get_config(opts.config)
 
-model_backbone = load_backbone(args)
-if torch.cuda.is_available():
-    model_backbone = nn.DataParallel(model_backbone)
-    model_backbone = model_backbone.cuda()
 
-print('Loading checkpoint', opts.evaluate)
-checkpoint = torch.load(opts.evaluate, map_location=lambda storage, loc: storage)
-model_backbone.load_state_dict(checkpoint['model_pos'], strict=True)
-model_pos = model_backbone
-model_pos.eval()
-testloader_params = {
-          'batch_size': 1,
-          'shuffle': False,
-          'num_workers': 8,
-          'pin_memory': True,
-          'prefetch_factor': 4,
-          'persistent_workers': True,
-          'drop_last': False
-}
+if __name__ == '__main__':
+    freeze_support()
 
-vid = imageio.get_reader(opts.vid_path,  'ffmpeg')
-fps_in = vid.get_meta_data()['fps']
-vid_size = vid.get_meta_data()['size']
-os.makedirs(opts.out_path, exist_ok=True)
+    model_backbone = load_backbone(args)
+    if torch.cuda.is_available():
+        model_backbone = nn.DataParallel(model_backbone)
+        model_backbone = model_backbone.cuda()
 
-if opts.pixel:
-    # Keep relative scale with pixel coornidates
-    wild_dataset = WildDetDataset(opts.json_path, clip_len=opts.clip_len, vid_size=vid_size, scale_range=None, focus=opts.focus)
-else:
-    # Scale to [-1,1]
-    wild_dataset = WildDetDataset(opts.json_path, clip_len=opts.clip_len, scale_range=[1,1], focus=opts.focus)
+    print('Loading checkpoint', opts.evaluate)
+    checkpoint = torch.load(opts.evaluate, map_location=lambda storage, loc: storage)
+    model_backbone.load_state_dict(checkpoint['model_pos'], strict=True)
+    model_pos = model_backbone
+    model_pos.eval()
+    testloader_params = {
+            'batch_size': 1,
+            'shuffle': False,
+            'num_workers': 8,
+            'pin_memory': True,
+            'prefetch_factor': 4,
+            'persistent_workers': True,
+            'drop_last': False
+    }
 
-test_loader = DataLoader(wild_dataset, **testloader_params)
+    vid = imageio.get_reader(opts.vid_path,  'ffmpeg')
+    fps_in = vid.get_meta_data()['fps']
+    vid_size = vid.get_meta_data()['size']
+    os.makedirs(opts.out_path, exist_ok=True)
 
-results_all = []
-with torch.no_grad():
-    for batch_input in tqdm(test_loader):
-        N, T = batch_input.shape[:2]
-        if torch.cuda.is_available():
-            batch_input = batch_input.cuda()
-        if args.no_conf:
-            batch_input = batch_input[:, :, :, :2]
-        if args.flip:    
-            batch_input_flip = flip_data(batch_input)
-            predicted_3d_pos_1 = model_pos(batch_input)
-            predicted_3d_pos_flip = model_pos(batch_input_flip)
-            predicted_3d_pos_2 = flip_data(predicted_3d_pos_flip) # Flip back
-            predicted_3d_pos = (predicted_3d_pos_1 + predicted_3d_pos_2) / 2.0
-        else:
-            predicted_3d_pos = model_pos(batch_input)
-        if args.rootrel:
-            predicted_3d_pos[:,:,0,:]=0                    # [N,T,17,3]
-        else:
-            predicted_3d_pos[:,0,0,2]=0
-            pass
-        if args.gt_2d:
-            predicted_3d_pos[...,:2] = batch_input[...,:2]
-        results_all.append(predicted_3d_pos.cpu().numpy())
+    if opts.pixel:
+        # Keep relative scale with pixel coornidates
+        wild_dataset = WildDetDataset(opts.json_path, clip_len=opts.clip_len, vid_size=vid_size, scale_range=None, focus=opts.focus)
+    else:
+        # Scale to [-1,1]
+        wild_dataset = WildDetDataset(opts.json_path, clip_len=opts.clip_len, scale_range=[1,1], focus=opts.focus)
 
-results_all = np.hstack(results_all)
-results_all = np.concatenate(results_all)
-render_and_save(results_all, '%s/X3D.mp4' % (opts.out_path), keep_imgs=False, fps=fps_in)
-if opts.pixel:
-    # Convert to pixel coordinates
-    results_all = results_all * (min(vid_size) / 2.0)
-    results_all[:,:,:2] = results_all[:,:,:2] + np.array(vid_size) / 2.0
-np.save('%s/X3D.npy' % (opts.out_path), results_all)
+    test_loader = DataLoader(wild_dataset, **testloader_params)
+
+    results_all = []
+    with torch.no_grad():
+        for batch_input in tqdm(test_loader):
+            N, T = batch_input.shape[:2]
+            if torch.cuda.is_available():
+                batch_input = batch_input.cuda()
+            if args.no_conf:
+                batch_input = batch_input[:, :, :, :2]
+            if args.flip:    
+                batch_input_flip = flip_data(batch_input)
+                predicted_3d_pos_1 = model_pos(batch_input)
+                predicted_3d_pos_flip = model_pos(batch_input_flip)
+                predicted_3d_pos_2 = flip_data(predicted_3d_pos_flip) # Flip back
+                predicted_3d_pos = (predicted_3d_pos_1 + predicted_3d_pos_2) / 2.0
+            else:
+                predicted_3d_pos = model_pos(batch_input)
+            if args.rootrel:
+                predicted_3d_pos[:,:,0,:]=0                    # [N,T,17,3]
+            else:
+                predicted_3d_pos[:,0,0,2]=0
+                pass
+            if args.gt_2d:
+                predicted_3d_pos[...,:2] = batch_input[...,:2]
+            results_all.append(predicted_3d_pos.cpu().numpy())
+
+    results_all = np.hstack(results_all)
+    results_all = np.concatenate(results_all)
+    render_and_save(results_all, '%s/X3D.mp4' % (opts.out_path), keep_imgs=False, fps=fps_in)
+    if opts.pixel:
+        # Convert to pixel coordinates
+        results_all = results_all * (min(vid_size) / 2.0)
+        results_all[:,:,:2] = results_all[:,:,:2] + np.array(vid_size) / 2.0
+    np.save('%s/X3D.npy' % (opts.out_path), results_all)
+
+    # # template for single image input
+    # import imageio
+    # import numpy as np
+    # import torch
+    # from torchvision.transforms import ToTensor
+
+    # # Read a single image
+    # img = imageio.imread(opts.img_path)
+    # fps_in = 1  # Since it's a single image, there's no real FPS
+    # img_size = img.shape[:2]
+    # os.makedirs(opts.out_path, exist_ok=True)
+
+    # # Convert the image to a PyTorch tensor
+    # tensor_img = ToTensor()(img).unsqueeze(0)
+
+    # # Prepare the test_input
+    # test_input = tensor_img  # If any preprocessing is required, apply it here
+
+    # results_all = []
+    # with torch.no_grad():
+    #     N, T = test_input.shape[:2]
+    #     if torch.cuda.is_available():
+    #         test_input = test_input.cuda()
+    #     if args.no_conf:
+    #         test_input = test_input[:, :, :, :2]
+    #     if args.flip:    
+    #         test_input_flip = flip_data(test_input)
+    #         predicted_3d_pos_1 = model_pos(test_input)
+    #         predicted_3d_pos_flip = model_pos(test_input_flip)
+    #         predicted_3d_pos_2 = flip_data(predicted_3d_pos_flip) # Flip back
+    #         predicted_3d_pos = (predicted_3d_pos_1 + predicted_3d_pos_2) / 2.0
+    #     else:
+    #         predicted_3d_pos = model_pos(test_input)
+    #     if args.rootrel:
+    #         predicted_3d_pos[:, :, 0, :] = 0  # [N, T, 17, 3]
+    #     else:
+    #         predicted_3d_pos[:, 0, 0, 2] = 0
+    #         pass
+    #     if args.gt_2d:
+    #         predicted_3d_pos[..., :2] = test_input[..., :2]
+    #     results_all.append(predicted_3d_pos.cpu().numpy())
+
+
